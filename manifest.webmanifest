@@ -1,0 +1,14 @@
+{
+  "name": "Investment Intelligence",
+  "short_name": "Invest Intel",
+  "description": "Upload an investment document. Get sourced financials, computed ratios, red flags and a research note.",
+  "start_url": "./",
+  "scope": "./",
+  "display": "standalone",
+  "background_color": "#0c1018",
+  "theme_color": "#0c1018",
+  "icons": [
+    { "src": "icon.svg", "sizes": "any", "type": "image/svg+xml", "purpose": "any" },
+    { "src": "icon.svg", "sizes": "any", "type": "image/svg+xml", "purpose": "maskable" }
+  ]
+}
