@@ -1,5 +1,5 @@
 /* Bump VERSION on every deploy (and the ?v= on the script/style tags in index.html). */
-const VERSION = 'ii-v8';
+const VERSION = 'ii-v10';
 const ASSETS = ['./', './index.html', './styles.css', './app.js', './sample.js', './features.js', './manifest.webmanifest', './icon.svg'];
 
 self.addEventListener('install', e => {

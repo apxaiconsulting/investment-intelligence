@@ -324,3 +324,14 @@ table.cmp thead th small{font-weight:400;text-transform:none;letter-spacing:0}
 .conf.good{color:var(--pos)}.conf.mid{color:var(--warn)}.conf.bad{color:var(--neg)}
 .samples{font-size:14px;color:var(--muted)}
 .samples .link{padding:9px 2px}
+.note-pending{display:flex;gap:14px;align-items:flex-start;padding:18px 20px;background:var(--surface);border:1px dashed var(--border-strong);border-radius:var(--radius);max-width:760px}
+.note-pending .typing{margin-top:8px}
+.note-pending p{margin:4px 0 0;font-size:14px}
+/* very narrow screens and embedded frames: keep the header on one line */
+.brand-name{overflow:hidden;text-overflow:ellipsis}
+@media (max-width:400px){
+  .topbar{gap:6px;padding:10px 12px}
+  .brand img{width:24px;height:24px}
+  .brand-name{font-size:14px}
+  .top-actions .ghost{padding:7px 8px;font-size:13px}
+}

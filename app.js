@@ -279,21 +279,31 @@ async function readPdf(file) {
 }
 async function readSheet(file) {
   const wb = XLSX.read(await readBuf(file), { type: 'array' });
-  return { pages: wb.SheetNames.map(nm => ({ text: XLSX.utils.sheet_to_csv(wb.Sheets[nm], { FS: ' | ', blankrows: false }), disp: 'sheet "' + nm + '"' })) };
+  // one line per row, cells joined by " | ", displayed values (no CSV quoting) so quotes match the sheet
+  return { pages: wb.SheetNames.map(nm => {
+    const rows = XLSX.utils.sheet_to_json(wb.Sheets[nm], { header: 1, raw: false, blankrows: false, defval: '' });
+    const text = rows.map(r => r.map(c => String(c).replace(/\s+/g, ' ').trim()).join(' | ').replace(/( \| )+$/, '')).filter(l => l.replace(/[| ]/g, '')).join('\n');
+    return { text, disp: 'sheet "' + nm + '"' };
+  }) };
+}
+// HTML (from .html files or Word via mammoth) -> text with table rows kept on one line
+function htmlToText(html) {
+  const d = new DOMParser().parseFromString(html, 'text/html');
+  d.querySelectorAll('script,style').forEach(x => x.remove());
+  d.querySelectorAll('tr').forEach(tr => {
+    const cells = [...tr.querySelectorAll('td,th')].map(c => c.textContent.replace(/\s+/g, ' ').trim());
+    tr.replaceWith(d.createTextNode('\n' + cells.join(' | ') + '\n'));
+  });
+  d.querySelectorAll('p,div,br,li,h1,h2,h3,h4,h5,h6').forEach(x => x.append('\n'));
+  return d.body.textContent.replace(/[ \t]+/g, ' ').replace(/ ?\n ?/g, '\n').replace(/\n{3,}/g, '\n\n').trim();
 }
 async function readDocx(file) {
-  const r = await mammoth.extractRawText({ arrayBuffer: await readBuf(file) });
-  return { pages: chunkText(r.value, 3500).map((t, i) => ({ text: t, disp: 'part ' + (i + 1) })) };
+  const r = await mammoth.convertToHtml({ arrayBuffer: await readBuf(file) });
+  return { pages: chunkText(htmlToText(r.value), 3500).map((t, i) => ({ text: t, disp: 'part ' + (i + 1) })) };
 }
 async function readText(file) {
   let t = await file.text();
-  if (/\.html?$/i.test(file.name)) {
-    const d = new DOMParser().parseFromString(t, 'text/html');
-    d.querySelectorAll('script,style').forEach(x => x.remove());
-    d.querySelectorAll('td,th').forEach(x => x.append(' | '));
-    d.querySelectorAll('tr,p,div,br,li,h1,h2,h3,h4').forEach(x => x.append('\n'));
-    t = d.body.textContent.replace(/[ \t]+/g, ' ').replace(/\n\s*\n+/g, '\n\n');
-  }
+  if (/\.html?$/i.test(file.name)) t = htmlToText(t);
   return { pages: chunkText(t, 3500).map((x, i) => ({ text: x, disp: 'part ' + (i + 1) })) };
 }
 async function readImage(file) {
@@ -682,8 +692,30 @@ const STEPS = [
   ['read', 'Reading the document'],
   ['extract', 'Extracting financials, terms and risks', '4 passes in parallel'],
   ['verify', 'Checking every number against its page'],
-  ['summary', 'Writing the research note'],
 ];
+/* core items worth a second, targeted look when a pass misses them */
+const GAP_HINTS = {
+  revenue: /total (net )?revenues?|net sales|total sales/i, cost_of_revenue: /cost of (revenues?|sales|goods sold)/i, gross_profit: /gross (profit|margin)/i, operating_income: /operating income|income from operations|operating (loss|profit)/i,
+  net_income: /net (income|loss|earnings)/i, interest_expense: /interest expense/i, depreciation_amortization: /depreciation and amortization/i,
+  cash: /cash and (cash )?equivalents/i, total_assets: /total assets/i, total_liabilities: /total liabilities/i, total_equity: /total (stockholders.?|shareholders.?)?\s*equity/i,
+  long_term_debt: /long-term debt|term loan|notes payable/i, operating_cash_flow: /(provided by|from|used in) operating activities/i,
+  capex: /capital expenditures?|purchases? of property|additions to property/i, noi: /net operating income/i, purchase_price: /purchase price/i,
+};
+function gapTargets(R, pages) {
+  const isRE = R.V.noi || R.V.purchase_price;
+  const L = R.periods.filter(p => periodKind(p) !== 'PROJ' && !/^current$/i.test(p)).slice(-1)[0];
+  const keys = [], hit = new Set();
+  for (const [k, re] of Object.entries(GAP_HINTS)) {
+    if (isRE ? !['noi', 'purchase_price'].includes(k) : ['noi', 'purchase_price'].includes(k)) continue;
+    if (R.V[k] && (L ? R.V[k][L] != null : true)) continue;
+    // only when a page with numbers names the item, so we never ask for something that is not there
+    const pg = pages.filter(p => p.text && re.test(p.text) && /\d{1,3}(,\d{3})+|\d+\.\d/.test(p.text));
+    if (!pg.length) continue;
+    keys.push(k); pg.slice(0, 4).forEach(p => hit.add(p.n));
+  }
+  if (keys.length && !R.V.revenue && !R.V.total_assets && !isRE) return { keys: [], pages: [] };
+  return { keys: keys.slice(0, 10), pages: pages.filter(p => hit.has(p.n)).slice(0, 12) };
+}
 function setStep(id, state, sub) {
   const li = document.querySelector('#steps li[data-id="' + id + '"]');
   if (!li) return;
@@ -730,7 +762,20 @@ async function analyze(fromSample) {
     setStep('extract', 'done', (4 - failed.length) + ' of 4 passes succeeded' + (failed.length ? ' (' + failed.map(f => f.pass).join(', ') + ' failed)' : ''));
 
     setStep('verify', 'run');
-    const R = mergeExtraction(results.slice(0, 3).filter(r => r && !r.error), qual, doc);
+    const passes = results.slice(0, 3).filter(r => r && !r.error);
+    let R = mergeExtraction(passes, qual, doc);
+    // second look: core items the document clearly mentions but the passes missed
+    const gap = gapTargets(R, sel.pages);
+    if (gap.keys.length) {
+      setStep('verify', 'run', 'Second look for ' + gap.keys.length + ' missed ' + (gap.keys.length === 1 ? 'item' : 'items') + ': ' + gap.keys.map(k => KEYS[k].label.toLowerCase()).join(', '));
+      try {
+        const g = await askRetry({ system: BASE_SYS, json: true, maxTokens: 6000,
+          prompt: 'An earlier pass missed some items. Extract ONLY these keys: ' + gap.keys.join(', ') + '.\nUse these period labels where they apply: ' + R.periods.join(', ') + '.\nOnly report values actually stated on these pages.\n' + NUM_RULES + '\n\n--- DOCUMENT PAGES ---\n' + docText(gap.pages) });
+        const before = R.items.length;
+        R = mergeExtraction([...passes, g], qual, doc);
+        R.gapFilled = R.items.length - before;
+      } catch (e) { if (e.message === 'cancelled') throw e; }
+    }
     addDerived(R);
     R.metrics = computeMetrics(R.V, R.periods);
     R.checks = runChecks(R, qual, doc);
@@ -750,22 +795,17 @@ async function analyze(fromSample) {
     R.unit = R.currency + ' millions';
     R.at = new Date().toISOString();
     const nOk = R.items.filter(i => i.status === 'ok').length;
-    setStep('verify', 'done', R.items.length + ' values extracted · ' + (R.items.some(i => i.status !== 'na') ? nOk + ' verified verbatim' : 'no text layer to match') + ' · ' + R.metrics.length + ' ratios');
+    setStep('verify', 'done', R.items.length + ' values extracted · ' + (R.items.some(i => i.status !== 'na') ? nOk + ' verified verbatim' : 'no text layer to match') + ' · ' + R.metrics.length + ' ratios' + (R.gapFilled ? ' · ' + R.gapFilled + ' recovered on a second look' : ''));
 
-    setStep('summary', 'run');
-    try {
-      R.summary = await writeSummary(R, text, inline, focus);
-      setStep('summary', 'done');
-    } catch (e) {
-      if (e.message === 'cancelled') throw e;
-      R.summary = '';
-      R.summaryError = e.message;
-      setStep('summary', 'err', 'Failed: ' + e.message);
-    }
+    // show everything now; the research note fills in when it is ready
+    R.summary = ''; R.summaryPending = true;
     S.result = R;
     saveHistory(R);
     renderResults(R);
     showView('results');
+    S.abort = null;
+    writeSummary(R, text, inline, focus).then(md => { R.summary = md; R.summaryError = ''; }, e => { R.summaryError = e.message; })
+      .finally(() => { R.summaryPending = false; saveHistory(R); if (S.result === R) renderSummary(R); });
   } catch (e) {
     if (e.message === 'cancelled') { showView('input'); toast('Cancelled'); return; }
     const run = document.querySelector('#steps li.run');
@@ -830,6 +870,10 @@ function renderResults(R) {
 
 function renderSummary(R) {
   const el = $('#summary');
+  if (!R.summary && R.summaryPending) {
+    el.innerHTML = '<div class="note-pending"><span class="typing"><i></i><i></i><i></i></span><div><strong>Writing the research note...</strong><p class="muted">About 30 to 60 seconds. Everything else is ready: try the Scenario lab, Ask, or Financials meanwhile.</p></div></div>';
+    return;
+  }
   if (!R.summary) {
     el.innerHTML = '<div class="empty">The research note could not be written' + (R.summaryError ? ' (' + esc(R.summaryError) + ')' : '') + '. The extracted data in the other tabs is complete.<br><br><button class="primary" id="btn-resum" type="button">Write the note again</button></div>';
     $('#btn-resum').onclick = regenSummary;
@@ -1105,7 +1149,7 @@ function slimForHistory(R) {
     if (!cited.has(p.n) || budget <= 0) return { n: p.n, text: '', disp: p.disp };
     budget -= p.text.length; return p;
   });
-  return Object.assign({}, R, { doc: Object.assign({}, R.doc, { pages }) });
+  return Object.assign({}, R, { summaryPending: false, doc: Object.assign({}, R.doc, { pages }) });
 }
 function saveHistory(R) {
   R.id = R.id || Date.now().toString(36);
