@@ -16,9 +16,9 @@ Upload an investment document (10-K, 10-Q, earnings release, S-1, pitch deck, PP
 
 ## How it works
 
-Static PWA, no build step. `app.js` = reading, extraction, verification, ratios, rendering, exports. `features.js` = scorecard, scenarios, ask, compare (wraps `renderResults` and `markdownDoc`). Period labels are normalized ("T-12 Actual" -> "T-12"), and values reported once as "Current" (price, loan, exit cap) stand in for every period when computing ratios. Files are read in the browser (pdf.js, SheetJS, mammoth). Long documents are trimmed to the most data-dense pages (about 120k characters). Four AI extraction passes run in parallel, then one summary pass, through the shared APX Cloudflare Worker (`studyforge-api`, free Gemini). Each call retries once, because the Worker gives each model 20 seconds and Gemini sometimes returns 503.
+Static PWA, no build step. `app.js` = reading, extraction, verification, ratios, rendering, exports. `features.js` = scorecard, scenarios, ask, compare (wraps `renderResults` and `markdownDoc`). Period labels are normalized ("T-12 Actual" -> "T-12"), and values reported once as "Current" (price, loan, exit cap) stand in for every period when computing ratios. Files are read in the browser (pdf.js, SheetJS, mammoth). Long documents are trimmed to the most data-dense pages (about 120k characters). Four AI extraction passes run in parallel. If a core item (revenue, net income, capex, cash, NOI...) is named on a page with numbers but was missed, a targeted second-look pass recovers it. Results open right away and the research note fills in afterward (about 30 seconds to results, 30 to 50 to the note). All calls go through the shared APX Cloudflare Worker (`studyforge-api`, free Gemini). Each call retries once, because the Worker gives each model 20 seconds and Gemini sometimes returns 503.
 
-Scanned PDFs (no text layer) and images are sent as files to Gemini's vision. That is capped at about 5.5 MB because the Worker rejects bodies over 8 MB.
+Word files keep table rows on one line (mammoth HTML), Excel sheets become one ` | `-joined line per row. Scanned PDFs (no text layer) and images are sent as files to Gemini's vision. That is capped at about 5.5 MB because the Worker rejects bodies over 8 MB.
 
 ## Local testing
 
